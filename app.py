@@ -159,9 +159,16 @@ ctx = webrtc_streamer(
     key="snapshot-scanner", 
     rtc_configuration=RTC_CONFIG, 
     video_processor_factory=ScannerGabarito,
-    media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False}
+    # ADICIONADO: facingMode "environment" força a câmera traseira no celular
+    media_stream_constraints={
+        "video": {
+            "facingMode": "environment",
+            "width": {"ideal": 1280}, 
+            "height": {"ideal": 720}
+        }, 
+        "audio": False
+    }
 )
-
 # Atualiza parâmetros IDÊNTICO
 if ctx.video_processor:
     ctx.video_processor.update_params(v_x1, v_y1, v_x2, v_y2, v_spX, v_spY, gabarito_dinamico)
