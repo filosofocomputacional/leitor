@@ -4,38 +4,21 @@ import cv2
 import numpy as np
 import av
 
-# Configuração da página Web
-st.set_page_config(page_title="Scanner de Gabarito", layout="wide")
-st.title("🎓 Scanner de Gabaritos em Tempo Real")
+# Função para ordenar os 4 pontos de forma infalível
+def ordenar_pontos(pts):
+    pts = np.array(pts, dtype="float32")
+    rect = np.zeros((4, 2), dtype="float32")
 
-# Servidor STUN (necessário para a câmera funcionar na nuvem/celular via 4G ou Wi-Fi)
-RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-)
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]      # Top-Left (menor soma)
+    rect[3] = pts[np.argmax(s)]      # Bottom-Right (maior soma)
 
-LETRAS = ["A", "B", "C", "D", "E"]
-padrao_letras = [1, 3, 2, 1, 2, 3, 2, 1, 0, 1]  # BDCBCDCBAB
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]   # Top-Right (menor diferença)
+    rect[2] = pts[np.argmax(diff)]   # Bottom-Left (maior diferença)
 
-# === PAINEL DE CONTROLE NA BARRA LATERAL (SUBSTITUI OS TRACKBARS DO OPENCV) ===
-st.sidebar.header("⚙️ Calibração dos Pontos")
-v_x1 = st.sidebar.slider("Q01-05: Horizontal (X1)", 0, 400, 100)
-v_y1 = st.sidebar.slider("Q01-05: Vertical (Y1)", 0, 400, 104)
-v_x2 = st.sidebar.slider("Q06-10: Horizontal (X2)", 0, 800, 356)
-v_y2 = st.sidebar.slider("Q06-10: Vertical (Y2)", 0, 400, 105)
-v_spX = st.sidebar.slider("Espaço Letras (Largura)", 0, 150, 33)
-v_spY = st.sidebar.slider("Espaço Linhas (Altura)", 0, 250, 51)
+    return rect
 
-st.sidebar.header("📝 Gabarito Oficial do Professor")
-gabarito_list = []
-cols = st.sidebar.columns(2)
-for i in range(10):
-    col = cols[0] if i < 5 else cols[1]
-    val = col.selectbox(f"Q{i+1:02d}", LETRAS, index=padrao_letras[i], key=f"q_{i}")
-    gabarito_list.append(val)
-
-gabarito_dinamico = "".join(gabarito_list)
-
-# === PROCESSADOR DE VÍDEO EM TEMPO REAL ===
 class ScannerGabarito(VideoProcessorBase):
     def __init__(self):
         self.v_x1 = v_x1
@@ -70,18 +53,15 @@ class ScannerGabarito(VideoProcessorBase):
                 if 300 < (w * h) < 30000 and 0.7 < (w / float(h)) < 1.3:
                     M = cv2.moments(cnt)
                     if M["m00"] != 0:
-                        anchors.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
+                        anchors.append([int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])])
 
         if len(anchors) == 4:
             for p in anchors:
-                cv2.circle(img, p, 8, (0, 255, 0), -1)
-            cv2.putText(img, "Alinhado! Lendo...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.circle(img, (p[0], p[1]), 8, (0, 255, 0), -1)
+            cv2.putText(img, "Gabarito Identificado!", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            # Ordena os pontos e faz a transformação de perspectiva
-            anchors = sorted(anchors, key=lambda p: p[1])
-            top = sorted(anchors[:2], key=lambda p: p[0])
-            bot = sorted(anchors[2:], key=lambda p: p[0])
-            pts_origem = np.float32([top[0], top[1], bot[0], bot[1]])
+            # 1. Ordenação Infalível
+            pts_origem = ordenar_pontos(anchors)
             
             dW, dH = 600, 450
             pts_destino = np.float32([[0, 0], [dW, 0], [0, dH], [dW, dH]])
@@ -89,7 +69,11 @@ class ScannerGabarito(VideoProcessorBase):
             
             warped = cv2.warpPerspective(img, M_trans, (dW, dH))
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            _, warped_thresh = cv2.threshold(cv2.GaussianBlur(warped_gray, (3, 3), 0), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # Limpeza e Threshold na imagem retificada
+            _, warped_thresh = cv2.threshold(
+                cv2.GaussianBlur(warped_gray, (3, 3), 0), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
 
             acertos = 0
             for q in range(10):
@@ -100,17 +84,38 @@ class ScannerGabarito(VideoProcessorBase):
                 y_ponto = col_base_y + (linha_idx * self.v_spY)
 
                 valores_alternativas = []
+                coords = []
+
                 for i in range(5):
                     x_ponto = col_base_x + (i * self.v_spX)
-                    if 0 <= y_ponto < dH and 0 <= x_ponto < dW:
+                    coords.append((x_ponto, y_ponto))
+                    
+                    if 12 <= y_ponto < dH - 12 and 12 <= x_ponto < dW - 12:
                         roi = warped_thresh[y_ponto-12:y_ponto+12, x_ponto-12:x_ponto+12]
                         total_pixels = cv2.countNonZero(roi)
                     else:
                         total_pixels = 0
                     valores_alternativas.append(total_pixels)
 
+                # 2. Análise Relativa da Marcação
                 idx_marcado = np.argmax(valores_alternativas)
-                resposta_aluno = LETRAS[idx_marcado] if valores_alternativas[idx_marcado] > 110 else "-"
+                max_pixels = valores_alternativas[idx_marcado]
+                
+                # Média dos pixels das OUTRAS alternativas que não foram marcadas
+                outras_alts = [v for idx, v in enumerate(valores_alternativas) if idx != idx_marcado]
+                media_outras = np.mean(outras_alts) if outras_alts else 0
+
+                # Só considera marcado se o ponto ativo for claramente maior que a média do resto
+                if max_pixels > 120 and max_pixels > (media_outras * 1.8):
+                    resposta_aluno = LETRAS[idx_marcado]
+                else:
+                    resposta_aluno = "-"
+
+                # Desenha feedback visual direto na imagem
+                color = (0, 255, 0) if (q < len(self.gabarito) and resposta_aluno == self.gabarito[q]) else (0, 0, 255)
+                for i, (cx, cy) in enumerate(coords):
+                    r_color = (0, 255, 0) if i == idx_marcado and resposta_aluno != "-" else (255, 255, 255)
+                    cv2.circle(warped, (cx, cy), 3, r_color, -1)
 
                 if q < len(self.gabarito) and resposta_aluno == self.gabarito[q]:
                     acertos += 1
@@ -118,20 +123,19 @@ class ScannerGabarito(VideoProcessorBase):
             nota = (acertos / 10.0) * 10.0
             cv2.putText(img, f"Nota: {nota:.1f} | Acertos: {acertos}/10", (20, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if nota >= 6 else (0, 0, 255), 2)
+            
+            # Subtitui um pedaço da imagem para você ver a retificação no canto (Feedback Visual)
+            img[0:150, img.shape[1]-200:img.shape[1]] = cv2.resize(warped, (200, 150))
+
         else:
             cv2.putText(img, "Alinhe os 4 cantos...", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        cv2.putText(img, f"Gabarito: {self.gabarito}", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# Inicializa o componente de vídeo WebRTC
+# 3. Forçar câmera em Alta Resolução (720p)
 ctx = webrtc_streamer(
     key="gabarito-scanner", 
     rtc_configuration=RTC_CONFIG, 
-    video_processor_factory=ScannerGabarito
+    video_processor_factory=ScannerGabarito,
+    media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False}
 )
-
-# Atualiza os parâmetros em tempo real conforme você mexe na barra lateral
-if ctx.video_processor:
-    ctx.video_processor.update_params(v_x1, v_y1, v_x2, v_y2, v_spX, v_spY, gabarito_dinamico)
